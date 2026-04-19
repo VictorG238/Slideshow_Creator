@@ -25,18 +25,21 @@ class FFmpegManager:
             if Path(env_path).exists():
                 return env_path
 
-        # 2. Check project bundled location
+        # 2. Check project bundled location (packaged in .exe)
         bundled = Path(__file__).resolve().parents[3] / "assets" / "ffmpeg" / "ffmpeg.exe"
         if bundled.exists():
+            print(f"[slideshow] Using bundled FFmpeg: {bundled}")
             return str(bundled)
 
-        # 3. Check cached location
+        # 3. Check cached location (from previous auto-download)
         cached = FFmpegManager.CACHE_DIR / "ffmpeg.exe"
         if cached.exists():
+            print(f"[slideshow] Using cached FFmpeg: {cached}")
             return str(cached)
 
         # 4. Check system PATH
         if system_ffmpeg := shutil.which("ffmpeg"):
+            print(f"[slideshow] Using system FFmpeg: {system_ffmpeg}")
             return system_ffmpeg
 
         return None
