@@ -41,8 +41,8 @@ https://github.com/user-attachments/assets/c0d44120-615e-4da2-8763-37c589076df0
 
 ```bash
 # Clone the repository
-git clone https://github.com/<your-user>/slideshow-creator.git
-cd slideshow-creator
+git clone https://github.com/VictorG238/Slideshow_Creator.git
+cd Slideshow_Creator
 
 # Create a virtual environment and install dependencies
 python -m venv .venv
@@ -64,7 +64,7 @@ run_app.bat --doctor   # verify environment and FFmpeg
 
 ## Download (standalone .exe)
 
-Pre-built Windows executables are available on the [Releases](https://github.com/<your-user>/slideshow-creator/releases) page. No Python installation required.
+Pre-built Windows executables are available on the [Releases](https://github.com/VictorG238/Slideshow_Creator/releases) page. No Python installation required.
 
 1. Download `slideshow_creator.exe` from the latest release.
 2. Place FFmpeg binaries (`ffmpeg.exe`, `ffprobe.exe`) next to it or ensure they are in your system PATH.
@@ -87,7 +87,7 @@ The single-file executable is written to `dist/slideshow_creator.exe`.
 ## Project Structure
 
 ```
-slideshow-creator/
+Slideshow_Creator/
   src/slideshow_creator/
     app.py              # Application controller and thread orchestration
     models/domain.py    # Data classes (GenerationRequest, AppError, ExportJob)
