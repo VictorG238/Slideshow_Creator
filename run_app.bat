@@ -54,6 +54,9 @@ set "PYTHONPATH=%SRC_PATH%;%PYTHONPATH%"
 call :ensure_deps
 if errorlevel 1 exit /b %errorlevel%
 
+call :ensure_ffmpeg
+if errorlevel 1 exit /b %errorlevel%
+
 echo [INFO] Starting application...
 call "%PYTHON_CMD%" %PYTHON_ARGS% -m %APP_MODULE%
 exit /b %errorlevel%
@@ -87,6 +90,44 @@ if errorlevel 1 (
 )
 
 echo [OK] Environment ready to run the app.
+exit /b 0
+
+:ensure_ffmpeg
+where ffmpeg >nul 2>&1
+if not errorlevel 1 (
+    echo [OK] FFmpeg detected in system PATH.
+    exit /b 0
+)
+
+if exist "assets\ffmpeg\ffmpeg.exe" (
+    echo [OK] FFmpeg found in assets\ffmpeg.
+    set "SLIDESHOW_FFMPEG_PATH=%CD%\assets\ffmpeg\ffmpeg.exe"
+    exit /b 0
+)
+
+echo [INFO] FFmpeg not found. Downloading FFmpeg...
+set "FFMPEG_ZIP=%TEMP%\ffmpeg.zip"
+set "FFMPEG_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
+
+if not exist "assets\ffmpeg" mkdir "assets\ffmpeg"
+
+powershell -Command "try { Invoke-WebRequest -Uri '%FFMPEG_URL%' -OutFile '%FFMPEG_ZIP%' -ErrorAction Stop; Write-Host '[OK] Downloaded FFmpeg'; exit 0 } catch { Write-Host '[ERROR] Failed to download FFmpeg'; exit 1 }"
+if errorlevel 1 (
+    echo [ERROR] Could not download FFmpeg from %FFMPEG_URL%
+    echo [INFO] Please install FFmpeg manually: https://ffmpeg.org/download.html
+    echo [INFO] Or set SLIDESHOW_FFMPEG_PATH environment variable.
+    exit /b 1
+)
+
+echo [INFO] Extracting FFmpeg...
+powershell -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory('%FFMPEG_ZIP%', '%TEMP%'); Move-Item '%TEMP%\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe' -Destination 'assets\ffmpeg\ffmpeg.exe' -Force; Move-Item '%TEMP%\ffmpeg-master-latest-win64-gpl-shared\bin\ffprobe.exe' -Destination 'assets\ffmpeg\ffprobe.exe' -Force -ErrorAction SilentlyContinue; Remove-Item '%FFMPEG_ZIP%'; Remove-Item '%TEMP%\ffmpeg-master-latest-win64-gpl-shared' -Recurse -Force -ErrorAction SilentlyContinue"
+if errorlevel 1 (
+    echo [ERROR] Failed to extract FFmpeg.
+    exit /b 1
+)
+
+set "SLIDESHOW_FFMPEG_PATH=%CD%\assets\ffmpeg\ffmpeg.exe"
+echo [OK] FFmpeg installed to assets\ffmpeg.
 exit /b 0
 
 :help
