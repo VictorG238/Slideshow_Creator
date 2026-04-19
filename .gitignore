@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+
+# Build artifacts
+dist/
+build/output/
+build/slideshow_creator/
+recovered_exe/
+*.spec.bak
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Testing
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Generated output videos (keep only the demo)
+*.mp4
+*.webm
+!assets/**/*.mp4
+!assets/**/*.webm
+
+# Agents / internal
+.agents/
+.specify/
+skills-lock.json

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slideshow-creator"
+version = "0.1.0"
+description = "Desktop app to build countdown slideshow videos from internet images"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+  "PySide6>=6.8,<7",
+  "Pillow>=10.0",
+  "requests>=2.32",
+  "ddgs>=9.0",
+  "ffmpeg-python>=0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "pytest-qt>=4.4",
+  "pyinstaller>=6.11",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = [
+  "slow: marks tests as slow (deselect with '-k not slow')",
+]
