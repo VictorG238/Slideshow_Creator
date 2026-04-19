@@ -84,7 +84,7 @@ class MainWindow(QMainWindow):
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setObjectName("subtitle")
 
-        badge = QLabel("DESKTOP  •  v0.1.0", content)
+        badge = QLabel("DESKTOP  •  v1.0", content)
         badge.setAlignment(Qt.AlignCenter)
         badge.setObjectName("headerBadge")
 
