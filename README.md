@@ -44,21 +44,17 @@ https://github.com/user-attachments/assets/c0d44120-615e-4da2-8763-37c589076df0
 git clone https://github.com/VictorG238/Slideshow_Creator.git
 cd Slideshow_Creator
 
-# Create a virtual environment and install dependencies
-python -m venv .venv
-# PowerShell
-.\.venv\Scripts\Activate.ps1
+# Create a virtual environment
+py -3.14 -m venv .venv
 
-# CMD
-.\.venv\Scripts\activate.bat
-
-# If PowerShell blocks script execution (optional)
-# Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-pip install -e .[dev]
+# Install dependencies (no activation required)
+.\.venv\Scripts\python.exe -m pip install -e .[dev]
 
 # Launch the application
-python -m slideshow_creator
+.\.venv\Scripts\python.exe -m slideshow_creator
 ```
+
+If `py` is not available, use `run_app.bat` from the project root.
 
 Or use the included helper script:
 
