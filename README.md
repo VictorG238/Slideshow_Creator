@@ -70,8 +70,9 @@ run_app.bat --doctor   # verify environment and FFmpeg
 Pre-built Windows executables are available on the [Releases](https://github.com/VictorG238/Slideshow_Creator/releases) page. No Python installation required.
 
 1. Download `slideshow_creator.exe` from the latest release.
-2. Place FFmpeg binaries (`ffmpeg.exe`, `ffprobe.exe`) next to it or ensure they are in your system PATH.
-3. Double-click the exe to launch.
+2. The file comes now bundled with ffmpeg inside, if still doesn't work for you, follow the step below, otherwise ignored it
+3. Place FFmpeg binaries (`ffmpeg.exe`, `ffprobe.exe`) next to it or ensure they are in your system PATH.
+4. Double-click the exe to launch.
 
 ---
 
