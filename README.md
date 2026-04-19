@@ -8,9 +8,9 @@ Type a search term, pick how many slides you want, and the app searches multiple
 
 ## Demo
 
-<video src="assets/top_25_sport_cars.mp4" controls muted preload="metadata" width="900"></video>
 
-[Open demo video directly (.mp4)](assets/top_25_sport_cars.mp4)
+https://github.com/user-attachments/assets/c0d44120-615e-4da2-8763-37c589076df0
+
 
 ---
 
