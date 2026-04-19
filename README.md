@@ -46,7 +46,14 @@ cd Slideshow_Creator
 
 # Create a virtual environment and install dependencies
 python -m venv .venv
-.venv\Scripts\activate
+# PowerShell
+.\.venv\Scripts\Activate.ps1
+
+# CMD
+.\.venv\Scripts\activate.bat
+
+# If PowerShell blocks script execution (optional)
+# Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 pip install -e .[dev]
 
 # Launch the application
