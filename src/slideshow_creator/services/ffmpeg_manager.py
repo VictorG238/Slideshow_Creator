@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -14,33 +15,59 @@ from typing import Optional
 class FFmpegManager:
     """Detect, cache, and download FFmpeg as needed."""
 
-    DOWNLOAD_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
+    DOWNLOAD_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
     CACHE_DIR = Path(os.getenv("APPDATA", Path.home() / "AppData" / "Roaming")) / "slideshow-creator" / "ffmpeg"
+
+    @staticmethod
+    def _is_usable_ffmpeg(path: Path) -> bool:
+        """Check if ffmpeg binary can actually start and report version."""
+        try:
+            completed = subprocess.run(
+                [str(path), "-version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=8,
+                check=False,
+            )
+            return completed.returncode == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _bundled_ffmpeg_path() -> Path:
+        """Resolve bundled ffmpeg path for source and frozen executable."""
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            base_dir = Path(getattr(sys, "_MEIPASS"))
+        else:
+            base_dir = Path(__file__).resolve().parents[3]
+        return base_dir / "assets" / "ffmpeg" / "ffmpeg.exe"
 
     @staticmethod
     def find_ffmpeg() -> Optional[str]:
         """Find FFmpeg in order of preference."""
         # 1. Check environment override
         if env_path := os.getenv("SLIDESHOW_FFMPEG_PATH"):
-            if Path(env_path).exists():
+            if Path(env_path).exists() and FFmpegManager._is_usable_ffmpeg(Path(env_path)):
                 return env_path
 
         # 2. Check project bundled location (packaged in .exe)
-        bundled = Path(__file__).resolve().parents[3] / "assets" / "ffmpeg" / "ffmpeg.exe"
-        if bundled.exists():
+        bundled = FFmpegManager._bundled_ffmpeg_path()
+        if bundled.exists() and FFmpegManager._is_usable_ffmpeg(bundled):
             print(f"[slideshow] Using bundled FFmpeg: {bundled}")
             return str(bundled)
 
-        # 3. Check cached location (from previous auto-download)
+        # 3. Check system PATH before cache so a valid global install is preferred
+        if system_ffmpeg := shutil.which("ffmpeg"):
+            system_path = Path(system_ffmpeg)
+            if FFmpegManager._is_usable_ffmpeg(system_path):
+                print(f"[slideshow] Using system FFmpeg: {system_ffmpeg}")
+                return system_ffmpeg
+
+        # 4. Check cached location (from previous auto-download)
         cached = FFmpegManager.CACHE_DIR / "ffmpeg.exe"
-        if cached.exists():
+        if cached.exists() and FFmpegManager._is_usable_ffmpeg(cached):
             print(f"[slideshow] Using cached FFmpeg: {cached}")
             return str(cached)
-
-        # 4. Check system PATH
-        if system_ffmpeg := shutil.which("ffmpeg"):
-            print(f"[slideshow] Using system FFmpeg: {system_ffmpeg}")
-            return system_ffmpeg
 
         return None
 

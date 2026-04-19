@@ -107,7 +107,7 @@ if exist "assets\ffmpeg\ffmpeg.exe" (
 
 echo [INFO] FFmpeg not found. Downloading FFmpeg...
 set "FFMPEG_ZIP=%TEMP%\ffmpeg.zip"
-set "FFMPEG_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
+set "FFMPEG_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
 
 if not exist "assets\ffmpeg" mkdir "assets\ffmpeg"
 
@@ -120,7 +120,7 @@ if errorlevel 1 (
 )
 
 echo [INFO] Extracting FFmpeg...
-powershell -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory('%FFMPEG_ZIP%', '%TEMP%'); Move-Item '%TEMP%\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe' -Destination 'assets\ffmpeg\ffmpeg.exe' -Force; Move-Item '%TEMP%\ffmpeg-master-latest-win64-gpl-shared\bin\ffprobe.exe' -Destination 'assets\ffmpeg\ffprobe.exe' -Force -ErrorAction SilentlyContinue; Remove-Item '%FFMPEG_ZIP%'; Remove-Item '%TEMP%\ffmpeg-master-latest-win64-gpl-shared' -Recurse -Force -ErrorAction SilentlyContinue"
+powershell -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory('%FFMPEG_ZIP%', '%TEMP%'); Move-Item '%TEMP%\ffmpeg-master-latest-win64-gpl\bin\ffmpeg.exe' -Destination 'assets\ffmpeg\ffmpeg.exe' -Force; Move-Item '%TEMP%\ffmpeg-master-latest-win64-gpl\bin\ffprobe.exe' -Destination 'assets\ffmpeg\ffprobe.exe' -Force -ErrorAction SilentlyContinue; Remove-Item '%FFMPEG_ZIP%'; Remove-Item '%TEMP%\ffmpeg-master-latest-win64-gpl' -Recurse -Force -ErrorAction SilentlyContinue"
 if errorlevel 1 (
     echo [ERROR] Failed to extract FFmpeg.
     exit /b 1
