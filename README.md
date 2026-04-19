@@ -87,32 +87,6 @@ The single-file executable is written to `dist/slideshow_creator.exe`.
 
 ---
 
-## Project Structure
-
-```
-Slideshow_Creator/
-  src/slideshow_creator/
-    app.py              # Application controller and thread orchestration
-    models/domain.py    # Data classes (GenerationRequest, AppError, ExportJob)
-    services/
-      image_search.py   # Multi-provider image search with fallback
-      slideshow_builder.py  # Countdown slide composition
-      audio_service.py  # MP3 validation, duration, loop count
-      export_service.py # FFmpeg encoding, codec detection, progress
-    ui/
-      main_window.py    # PySide6 main window
-      styles.py         # Design tokens and stylesheet
-  tests/
-    unit/               # Fast isolated tests
-    ui/                 # pytest-qt GUI tests
-    integration/        # FFmpeg pipeline and packaging smoke tests
-  build/
-    slideshow_creator.spec  # PyInstaller build config
-  assets/ffmpeg/        # Optional bundled FFmpeg binaries
-```
-
----
-
 ## Running Tests
 
 ```bash
