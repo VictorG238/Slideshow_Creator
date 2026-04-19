@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect,
 )
 
+from slideshow_creator import __version__
 from slideshow_creator.ui.styles import (
     APP_MIN_HEIGHT, APP_MIN_WIDTH, DEFAULT_COUNTDOWN_BG, build_app_stylesheet,
     KPI_ACCENT_NEXT, KPI_ACCENT_SLIDES, KPI_ACCENT_IMAGES, KPI_ACCENT_EXPORT,
@@ -84,7 +85,7 @@ class MainWindow(QMainWindow):
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setObjectName("subtitle")
 
-        badge = QLabel("DESKTOP  •  v1.0", content)
+        badge = QLabel(f"DESKTOP  •  v{__version__}", content)
         badge.setAlignment(Qt.AlignCenter)
         badge.setObjectName("headerBadge")
 
