@@ -52,6 +52,7 @@ class AppController(QObject):
         self._export_thread: QThread | None = None
         self._export_worker: _BackgroundTaskWorker | None = None
         self.window.generation_requested.connect(self._handle_generation_request)
+        self.window.rerun_requested.connect(self._handle_generation_request)
         self.window.export_requested.connect(self._handle_export_request)
         self.window.audio_changed.connect(self._handle_audio_changed)
         
@@ -79,7 +80,7 @@ class AppController(QObject):
             providers = [str(item).strip().lower() for item in search_engines if str(item).strip()]
 
         def _task(progress_cb: Callable[[ProgressEvent], None]) -> BuildResult:
-            candidates = self.image_search_service.probe(
+            candidates, search_summary = self.image_search_service.probe(
                 search_term=search_term,
                 limit=count,
                 providers=providers,
@@ -88,7 +89,7 @@ class AppController(QObject):
 
             image_refs = [candidate.source_url for candidate in candidates]
 
-            return self.slideshow_builder.build(
+            build_result = self.slideshow_builder.build(
                 search_term=search_term,
                 count=count,
                 image_refs=image_refs,
@@ -96,6 +97,8 @@ class AppController(QObject):
                 allow_reuse=True,
                 progress_cb=progress_cb,
             )
+            build_result.search_summary = search_summary
+            return build_result
 
         self._start_generation_task(_task)
 

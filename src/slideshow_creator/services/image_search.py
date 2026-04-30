@@ -9,12 +9,13 @@ from io import BytesIO
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import random
 import re
+import time
 from typing import Callable, Dict, List, Optional
 
 import requests
 from PIL import Image
 
-from slideshow_creator.models.domain import AppError, ErrorCategory, ProgressEvent
+from slideshow_creator.models.domain import AppError, ErrorCategory, ProgressEvent, SearchRunSummary, ShortfallReason
 
 
 @dataclass(slots=True)
@@ -66,7 +67,22 @@ class ImageSearchService:
 
     _SIGNATURE_SAMPLE_BYTES = 262_144
     _SIGNATURE_GRID_SIZE = 16
-    
+
+    MAX_REQUESTED_COUNT = 2000
+    COMPLETION_THRESHOLD_RATIO = 0.95
+    EXPANSION_BUDGET_FACTOR = 4
+    MAX_VALIDATION_POOL_FACTOR = 4
+    HARD_VALIDATION_CAP = 1500
+
+    # Pagination / rate-limit settings for scrape-based providers
+    BING_PAGE_SIZE = 35
+    BING_MAX_PAGES = 15
+    BING_INTER_PAGE_DELAY_SECONDS = 0.9
+    OPENVERSE_PAGE_SIZE = 100
+    OPENVERSE_MAX_PAGES = 10
+    OPENVERSE_INTER_PAGE_DELAY_SECONDS = 0.4
+
+
     # Updated regexes to match current responses
     GOOGLE_IMAGE_RE = re.compile(r'\[\"(https?://[^\"]+?)\",\d+,\d+\]') 
     BING_IMAGE_RE = re.compile(r'murl(?:&quot;|\"):&quot;|(https?://[^\"]+?)(?:&quot;|\")')
@@ -147,6 +163,7 @@ class ImageSearchService:
         validation_pool_factor: int = 1,
         max_validation_checks: int = 80,
         validation_timeout_seconds: float = 1.8,
+        retry_backoff_seconds: float = 2.0,
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.session = session or requests.Session()
@@ -155,6 +172,7 @@ class ImageSearchService:
         self.validation_pool_factor = max(1, validation_pool_factor)
         self.max_validation_checks = max(10, max_validation_checks)
         self.validation_timeout_seconds = max(0.5, min(validation_timeout_seconds, self.timeout_seconds))
+        self.retry_backoff_seconds = max(0.0, retry_backoff_seconds)
 
     def probe(
         self,
@@ -162,13 +180,17 @@ class ImageSearchService:
         limit: int,
         providers: Optional[list[str]] = None,
         progress_cb: Optional[Callable[[ProgressEvent], None]] = None,
-    ) -> List[ImageCandidate]:
-        """Probe providers and return normalized, deduplicated image candidates."""
+    ) -> tuple[List[ImageCandidate], SearchRunSummary]:
+        """Probe providers and return selected candidates plus summary metrics."""
         normalized_term = search_term.strip()
         if not normalized_term:
             raise AppError(ErrorCategory.USER_INPUT, "Search term must not be empty.", "Enter a word or phrase to search for.")
-        if limit <= 0:
-            return []
+        if limit < 1 or limit > self.MAX_REQUESTED_COUNT:
+            raise AppError(
+                ErrorCategory.USER_INPUT,
+                f"Requested count must be between 1 and {self.MAX_REQUESTED_COUNT}.",
+                f"Enter a number between 1 and {self.MAX_REQUESTED_COUNT}.",
+            )
 
         active_providers = self._resolve_providers(providers)
         if not active_providers:
@@ -183,6 +205,7 @@ class ImageSearchService:
                 progress_cb(ProgressEvent("image_search", msg, percent))
 
         candidates: List[ImageCandidate] = []
+        source_errors: Dict[str, str] = {}
         provider_fetchers = {
             self.PROVIDER_OPENVERSE: ("Openverse", self._probe_openverse),
             self.PROVIDER_GOOGLE: ("Google Images", self._probe_google),
@@ -190,17 +213,28 @@ class ImageSearchService:
             self.PROVIDER_DUCKDUCKGO: ("DuckDuckGo", self._probe_duckduckgo),
         }
 
-        total_providers = len(active_providers)
-        for index, provider_name in enumerate(active_providers, start=1):
-            provider_label, provider_fetch = provider_fetchers[provider_name]
-            progress_value = 0.1 + ((index - 1) / max(total_providers, 1)) * 0.7
-            _report(f"Probing {provider_label} for {normalized_term}...", progress_value)
-            candidates.extend(provider_fetch(normalized_term, limit))
+        query_variants = self._generate_query_variants(normalized_term)
+        
+        for variant_idx, variant in enumerate(query_variants):
+            if len(candidates) >= limit * self.COMPLETION_THRESHOLD_RATIO:
+                break
+                
+            for index, provider_name in enumerate(active_providers, start=1):
+                provider_label, provider_fetch = provider_fetchers[provider_name]
+                progress_value = 0.1 + ((variant_idx * len(active_providers) + index) / (len(query_variants) * len(active_providers))) * 0.7
+                _report(f"Probing {provider_label} for '{variant}'...", progress_value)
+                
+                remaining = max(0, limit - len(candidates))
+                fetch_limit = max(50, int(remaining * 1.5 + 20))
+                fetched, error = self._fetch_with_retry(
+                    provider_name, provider_fetch, variant, fetch_limit
+                )
+                if error:
+                    source_errors[provider_name] = error
+                candidates.extend(fetched)
 
-        # Always add Openverse as a bonus source for diversity, if not already included.
-        if self.PROVIDER_OPENVERSE not in active_providers:
-            _report("Probing Openverse (bonus)...", 0.85)
-            candidates.extend(self._probe_openverse(normalized_term, limit))
+                if len(candidates) >= limit * self.COMPLETION_THRESHOLD_RATIO:
+                    break
 
         if not candidates:
             _report("Selected engines returned no results. Trying fallback engines...", 0.75)
@@ -214,7 +248,12 @@ class ImageSearchService:
                     continue
                 provider_label, provider_fetch = provider_fetchers[provider_name]
                 _report(f"Fallback probe: {provider_label}...", 0.78)
-                candidates.extend(provider_fetch(normalized_term, limit))
+                fetched, error = self._fetch_with_retry(
+                    provider_name, provider_fetch, normalized_term, limit
+                )
+                if error:
+                    source_errors[provider_name] = error
+                candidates.extend(fetched)
                 if candidates:
                     break
 
@@ -225,12 +264,20 @@ class ImageSearchService:
                 "Check your internet connection, or try a more common search term.",
             )
 
-        _report("Deduplicating and shuffling results...", 0.82)
-        final_list = self._randomized_unique_candidates(normalized_term, limit, candidates)
+        _report("Deduplicating results...", 0.82)
+        deduped, exact_removed, near_removed = self._apply_selection_policy(
+            candidates, normalized_term, limit
+        )
 
-        if self.validate_candidates and final_list:
-            _report("Validating downloadable image sources...", 0.9)
-            final_list = self._select_downloadable_unique_candidates(final_list, limit)
+        invalid_removed = 0
+        if self.validate_candidates and deduped:
+            _report("Validating downloadable image sources...", 0.88)
+            before_count = len(deduped)
+            deduped = self._select_downloadable_unique_candidates(deduped, limit)
+            invalid_removed = max(0, before_count - len(deduped))
+
+        _report("Selecting best results...", 0.92)
+        final_list = self._select_diverse(deduped, normalized_term, limit)
 
         if not final_list:
             raise AppError(
@@ -239,8 +286,86 @@ class ImageSearchService:
                 "Try another search term or enable more search engines.",
             )
 
+        provider_logs = {}
+        for c in candidates:
+            provider_logs[c.source_name] = provider_logs.get(c.source_name, 0) + 1
+
+        shortfall_reasons = []
+        if len(final_list) < limit:
+            shortfall_reasons.append(ShortfallReason.LOW_AVAILABILITY)
+        if near_removed > 0:
+            shortfall_reasons.append(ShortfallReason.FILTERED_DUPLICATES)
+        if invalid_removed > 0:
+            shortfall_reasons.append(ShortfallReason.FILTERED_VALIDATION)
+
+        retry_suggestions = self._generate_retry_suggestions(
+            search_term=normalized_term,
+            limit=limit,
+            discovered=len(candidates),
+            selected=len(final_list),
+            provider_logs=provider_logs,
+            source_errors=source_errors,
+            shortfall_reasons=shortfall_reasons,
+        )
+
+        summary = SearchRunSummary(
+            requested=limit,
+            discovered=len(candidates),
+            invalid_removed=invalid_removed,
+            duplicate_removed=exact_removed,
+            near_duplicate_removed=near_removed,
+            selected=len(final_list),
+            provider_logs=provider_logs,
+            shortfall_reasons=shortfall_reasons,
+            retry_suggestions=retry_suggestions,
+            source_errors=source_errors,
+        )
+
         _report(f"Found {len(final_list)} unique matching images.", 1.0)
-        return final_list
+        return final_list, summary
+
+    _TERM_SYNONYMS: dict[str, str] = {
+        "cars": "auto",
+        "car": "auto",
+        "autos": "car",
+        "auto": "car",
+        "dogs": "puppy",
+        "dog": "puppy",
+        "cats": "kitten",
+        "cat": "kitten",
+        "music": "song",
+        "house": "home",
+        "food": "meal",
+        "city": "town",
+        "ocean": "sea",
+        "mountain": "hill",
+        "flower": "bloom",
+        "bird": "avian",
+    }
+
+    def _generate_query_variants(self, search_term: str) -> list[str]:
+        normalized = search_term.strip().lower()
+        variants = [normalized]
+        if normalized.endswith("s"):
+            variants.append(normalized[:-1])
+        else:
+            variants.append(normalized + "s")
+
+        synonym = self._TERM_SYNONYMS.get(normalized)
+        if synonym:
+            variants.append(synonym)
+
+        variants.append(f"{normalized} HD")
+        variants.append(f"{normalized} photography")
+
+        unique_variants = []
+        seen = set()
+        for v in variants:
+            if v not in seen:
+                seen.add(v)
+                unique_variants.append(v)
+
+        return unique_variants[:self.EXPANSION_BUDGET_FACTOR]
 
     def _select_downloadable_unique_candidates(
         self,
@@ -381,6 +506,25 @@ class ImageSearchService:
                 result.append(normalized)
         return result
 
+    def _fetch_with_retry(
+        self,
+        provider_name: str,
+        provider_fetch: Callable[[str, int], List[ImageCandidate]],
+        search_term: str,
+        limit: int,
+    ) -> tuple[List[ImageCandidate], Optional[str]]:
+        """Fetch from provider with one retry on empty result with backoff."""
+        result = provider_fetch(search_term, limit)
+        if result:
+            return result, None
+
+        time.sleep(self.retry_backoff_seconds)
+        result = provider_fetch(search_term, limit)
+        if result:
+            return result, None
+
+        return [], f"No results from {provider_name} for '{search_term}' after retry"
+
     def _randomized_unique_candidates(
         self,
         seed_term: str,
@@ -417,6 +561,131 @@ class ImageSearchService:
         rng.shuffle(result)
         return result
 
+    _NEAR_DUPE_SIZE_RE = re.compile(r"[_-]\d{2,5}x\d{2,5}")
+
+    @staticmethod
+    def _url_path_stem(url: str) -> str:
+        """Extract domain + filename stem for near-duplicate grouping."""
+        split = urlsplit(url)
+        path = split.path or "/"
+        filename = path.rsplit("/", 1)[-1] if "/" in path else path
+        stem = ImageSearchService._NEAR_DUPE_SIZE_RE.sub("", filename)
+        stem = re.sub(r"\.(jpg|jpeg|png|gif|webp|bmp|tiff?)(\?.*)?$", "", stem, flags=re.IGNORECASE)
+        return f"{split.netloc}/{stem}"
+
+    def _detect_near_duplicate_urls(
+        self, candidates: List[ImageCandidate]
+    ) -> set[str]:
+        """Identify near-duplicate URLs by shared domain + filename stem."""
+        groups: Dict[str, list[str]] = {}
+        for c in candidates:
+            stem = self._url_path_stem(c.source_url)
+            groups.setdefault(stem, []).append(c.source_url)
+
+        near_dupes: set[str] = set()
+        for urls in groups.values():
+            if len(urls) > 1:
+                near_dupes.update(urls[1:])
+        return near_dupes
+
+    def _filter_near_duplicates_by_signature(
+        self, candidates: List[ImageCandidate]
+    ) -> tuple[List[ImageCandidate], int]:
+        """Remove near-duplicates using pHash-like visual signatures."""
+        kept: List[ImageCandidate] = []
+        seen_signatures: set[str] = set()
+        removed = 0
+        for c in candidates:
+            sig = self._probe_image_signature(c.source_url)
+            if sig and sig in seen_signatures:
+                removed += 1
+                continue
+            if sig:
+                seen_signatures.add(sig)
+            kept.append(c)
+        return kept, removed
+
+    @staticmethod
+    def _score_candidate_relevance(candidate: ImageCandidate, search_term: str) -> float:
+        """Score candidate relevance to search term on 0.0–1.0 scale."""
+        score = 0.0
+        term_lower = search_term.lower()
+        title_lower = candidate.title.lower()
+
+        term_words = set(term_lower.split())
+        title_words = set(title_lower.split())
+        word_overlap = term_words & title_words
+        if word_overlap:
+            score += 0.4 * (len(word_overlap) / len(term_words))
+
+        if term_lower in title_lower:
+            score += 0.25
+
+        if candidate.width > 0 and candidate.height > 0:
+            score += 0.1
+            megapixels = (candidate.width * candidate.height) / 1_000_000
+            if megapixels >= 0.5:
+                score += min(0.15, megapixels * 0.05)
+
+        return min(1.0, score)
+
+    def _select_diverse(
+        self,
+        candidates: List[ImageCandidate],
+        search_term: str,
+        limit: int,
+    ) -> List[ImageCandidate]:
+        """Select candidates balancing relevance scores with source diversity."""
+        if not candidates:
+            return []
+
+        scored = [(self._score_candidate_relevance(c, search_term), c) for c in candidates]
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+
+        selected: List[ImageCandidate] = []
+        source_counts: Dict[str, int] = {}
+        unique_sources = len({c.source_name for c in candidates})
+        max_per_source = max(2, int(limit * 0.6)) if unique_sources > 1 else limit
+
+        for _score, candidate in scored:
+            if len(selected) >= limit:
+                break
+            src = candidate.source_name
+            if source_counts.get(src, 0) >= max_per_source:
+                continue
+            selected.append(candidate)
+            source_counts[src] = source_counts.get(src, 0) + 1
+
+        return selected
+
+    def _apply_selection_policy(
+        self,
+        candidates: List[ImageCandidate],
+        search_term: str,
+        limit: int,
+    ) -> tuple[List[ImageCandidate], int, int]:
+        """Apply dedup and near-duplicate filtering. Returns (deduped, exact_removed, near_removed)."""
+        unique: Dict[str, ImageCandidate] = {}
+        for c in candidates:
+            canonical = self._canonical_url(c.source_url)
+            if not canonical:
+                continue
+            c.source_url = canonical
+            unique.setdefault(canonical, c)
+        deduped = list(unique.values())
+        exact_removed = len(candidates) - len(deduped)
+
+        near_dupe_urls = self._detect_near_duplicate_urls(deduped)
+        after_near: List[ImageCandidate] = []
+        near_removed = 0
+        for c in deduped:
+            if c.source_url in near_dupe_urls:
+                near_removed += 1
+            else:
+                after_near.append(c)
+
+        return after_near, exact_removed, near_removed
+
     @staticmethod
     def _canonical_url(raw_url: str) -> str:
         """Normalize URL for deduplication while preserving identity query params."""
@@ -438,17 +707,68 @@ class ImageSearchService:
         canonical_query = urlencode(sorted(filtered_pairs), doseq=True)
         return urlunsplit((split.scheme, split.netloc, split.path, canonical_query, ""))
 
+    def _generate_retry_suggestions(
+        self,
+        search_term: str,
+        limit: int,
+        discovered: int,
+        selected: int,
+        provider_logs: Dict[str, int],
+        source_errors: Dict[str, str],
+        shortfall_reasons: list[ShortfallReason],
+    ) -> list[str]:
+        """Generate plain-language retry suggestions when completion is below 80%."""
+        completion_pct = selected / max(1, limit)
+        if completion_pct >= 0.80:
+            return []
+
+        suggestions: list[str] = []
+
+        if source_errors:
+            failed = ", ".join(source_errors.keys())
+            suggestions.append(
+                f"Some search engines ({failed}) did not return results. "
+                "Try enabling more engines or retrying later."
+            )
+
+        if discovered < limit:
+            variants_suggestion = (
+                f"Try a broader search term instead of '{search_term}' "
+                f"(for example, use a more common word or phrase)."
+            )
+            suggestions.append(variants_suggestion)
+
+        if selected < limit:
+            suggestions.append(
+                f"Reduce slide count to {selected} or fewer to match the available images."
+            )
+
+        if not suggestions:
+            suggestions.append(
+                "Try a different or more common search term to find more images."
+            )
+            suggestions.append(
+                f"Enable more search engines to increase the variety of results."
+            )
+
+        return suggestions
+
     def _probe_openverse(self, search_term: str, limit: int) -> List[ImageCandidate]:
-        page_size = max(limit * 4, 20)
+        """Paginate Openverse API with a delay between pages to respect rate limits."""
+        target = max(limit * 2, 20)
+        max_pages = min(
+            self.OPENVERSE_MAX_PAGES,
+            (target // self.OPENVERSE_PAGE_SIZE) + 1,
+        )
         all_candidates: List[ImageCandidate] = []
 
-        for page_num in (1, 2):
+        for page_num in range(1, max_pages + 1):
             try:
                 response = self.session.get(
                     self.OPENVERSE_IMAGES_ENDPOINT,
                     params={
                         "q": search_term,
-                        "page_size": page_size,
+                        "page_size": self.OPENVERSE_PAGE_SIZE,
                         "page": page_num,
                     },
                     timeout=self.timeout_seconds,
@@ -462,7 +782,8 @@ class ImageSearchService:
             if not items:
                 break
 
-            for idx, item in enumerate(items[:page_size], start=1):
+            page_start_idx = len(all_candidates) + 1
+            for idx, item in enumerate(items, start=page_start_idx):
                 source_url = str(item.get("url", "")).strip()
                 if not source_url:
                     continue
@@ -481,6 +802,16 @@ class ImageSearchService:
                         height=height,
                     )
                 )
+
+            if len(all_candidates) >= target:
+                break
+
+            # Provider returned a partial page — no more results available
+            if len(items) < self.OPENVERSE_PAGE_SIZE:
+                break
+
+            if page_num < max_pages:
+                time.sleep(self.OPENVERSE_INTER_PAGE_DELAY_SECONDS)
 
         return all_candidates
 
@@ -515,38 +846,65 @@ class ImageSearchService:
         ]
 
     def _probe_bing(self, search_term: str, limit: int) -> List[ImageCandidate]:
-        try:
-            response = self.session.get(
-                self.BING_IMAGES_ENDPOINT,
-                params={
-                    "q": search_term,
-                    "form": "HDRSC3",
-                    "first": 1,
-                    "tsc": "ImageBasicHover",
-                },
-                headers=self._browser_headers(),
-                timeout=self.timeout_seconds,
-            )
-            response.raise_for_status()
-        except requests.RequestException:
-            return []
-
-        urls = re.findall(r'murl(?:&quot;|\"):(?:&quot;|\")?(https?://[^\"]+?)(?:&quot;|\")', response.text)
-        if not urls:
-            urls = re.findall(r'murl(?:&quot;|\")(?:&quot;|\")?(https?://[^\&]+?)(?:&quot;|\")', response.text)
-        urls = [html.unescape(u) for u in urls]
-
+        """Paginate Bing image search using the `first` offset param with delays between pages."""
+        target = max(limit * 2, 20)
+        max_pages = min(
+            self.BING_MAX_PAGES,
+            (target // self.BING_PAGE_SIZE) + 1,
+        )
         candidates: List[ImageCandidate] = []
-        for idx, url in enumerate(urls[: max(limit * 4, 20)], start=1):
-            candidates.append(
-                ImageCandidate(
-                    source_url=url,
-                    source_name="bing-images",
-                    title=f"{search_term} {idx}",
-                    width=0,
-                    height=0,
+        seen_urls: set[str] = set()
+
+        for page in range(max_pages):
+            first = page * self.BING_PAGE_SIZE + 1
+            try:
+                response = self.session.get(
+                    self.BING_IMAGES_ENDPOINT,
+                    params={
+                        "q": search_term,
+                        "form": "HDRSC3",
+                        "first": first,
+                        "count": self.BING_PAGE_SIZE,
+                        "tsc": "ImageBasicHover",
+                    },
+                    headers=self._browser_headers(),
+                    timeout=self.timeout_seconds,
                 )
-            )
+                response.raise_for_status()
+            except requests.RequestException:
+                break
+
+            urls = re.findall(r'murl(?:&quot;|\"):(?:&quot;|\")?(https?://[^\"]+?)(?:&quot;|\")', response.text)
+            if not urls:
+                urls = re.findall(r'murl(?:&quot;|\")(?:&quot;|\")?(https?://[^\&]+?)(?:&quot;|\")', response.text)
+            urls = [html.unescape(u) for u in urls]
+
+            new_this_page = 0
+            for url in urls:
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                new_this_page += 1
+                candidates.append(
+                    ImageCandidate(
+                        source_url=url,
+                        source_name="bing-images",
+                        title=f"{search_term} {len(candidates) + 1}",
+                        width=0,
+                        height=0,
+                    )
+                )
+
+            if len(candidates) >= target:
+                break
+
+            # Bing returned no new URLs — end of results
+            if new_this_page == 0:
+                break
+
+            if page < max_pages - 1:
+                time.sleep(self.BING_INTER_PAGE_DELAY_SECONDS)
+
         return candidates
 
     def _probe_duckduckgo(self, search_term: str, limit: int) -> List[ImageCandidate]:

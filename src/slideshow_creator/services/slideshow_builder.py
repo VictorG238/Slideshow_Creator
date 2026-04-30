@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Iterable, List, Optional, Sequence
 
-from slideshow_creator.models.domain import AppError, ErrorCategory, ProgressEvent
+from slideshow_creator.models.domain import AppError, ErrorCategory, ProgressEvent, SearchRunSummary
 
 
 class SlideshowBuildError(ValueError):
@@ -43,63 +43,106 @@ class BuildResult:
 
     slides: List[SlideFrame]
     summary: BuildSummary
+    search_summary: Optional[SearchRunSummary] = None
 
 
 class SlideshowBuilder:
     """Build countdown slide metadata from image references."""
 
     @staticmethod
-    def _find_insert_position(assignment: List[str], image_ref: str, target_index: int) -> int:
-        """Pick an insertion slot near target_index that avoids adjacent duplicates when possible."""
-        if not assignment:
-            return 0
+    def _build_interleaved_assignment(
+        refs: Sequence[str], count: int, search_term: str
+    ) -> List[str]:
+        """Assign images to slide slots using stride-based interleaving.
 
-        target = max(1, min(len(assignment), target_index))
-        for delta in range(0, len(assignment) + 1):
-            for candidate in (target - delta, target + delta):
-                if candidate < 1 or candidate > len(assignment):
-                    continue
-                prev_ref = assignment[candidate - 1] if candidate - 1 >= 0 else None
-                next_ref = assignment[candidate] if candidate < len(assignment) else None
-                if image_ref != prev_ref and image_ref != next_ref:
-                    return candidate
-        return target
+        Given N unique images and C slots, each image is placed at
+        positions ``i, i+N, i+2N, ...`` which guarantees a minimum
+        spacing of N between repeated uses.  A deterministic shuffle
+        of the image order per cycle adds visual variety while keeping
+        the result reproducible for the same search term.
+        """
+        import hashlib as _hl, random as _rng
+
+        n = len(refs)
+        seed = int(_hl.sha256(search_term.encode()).hexdigest(), 16)
+        rng = _rng.Random(seed)
+
+        # Build full cycles, each independently shuffled.
+        full_cycles = count // n
+        remainder = count % n
+        assignment: List[str] = []
+
+        for _ in range(full_cycles):
+            cycle = list(refs)
+            rng.shuffle(cycle)
+            assignment.extend(cycle)
+
+        if remainder:
+            tail = list(refs)
+            rng.shuffle(tail)
+            assignment.extend(tail[:remainder])
+
+        # Final pass: fix any adjacent duplicates at cycle boundaries.
+        SlideshowBuilder._fix_adjacent_duplicates(assignment)
+
+        # Ensure last few slides don't reuse the same images as the first few.
+        SlideshowBuilder._fix_tail_head_overlap(assignment)
+
+        return assignment
 
     @staticmethod
-    def _separate_adjacent_duplicates(assignment: List[str]) -> None:
-        """Swap elements in-place to reduce adjacent duplicate image refs."""
-        for idx in range(1, len(assignment)):
-            if assignment[idx] != assignment[idx - 1]:
+    def _fix_tail_head_overlap(assignment: List[str], window: int = 5) -> None:
+        """Swap tail slots that duplicate head slots with safe mid-range slots."""
+        if len(assignment) <= window * 2:
+            return
+        head_refs = set(assignment[:window])
+        tail_start = len(assignment) - window
+        for tail_idx in range(tail_start, len(assignment)):
+            if assignment[tail_idx] not in head_refs:
                 continue
-
-            swapped = False
-            for swap_idx in range(idx + 1, len(assignment)):
-                candidate = assignment[swap_idx]
-                left_neighbor = assignment[idx - 1]
-                right_neighbor = assignment[idx + 1] if idx + 1 < len(assignment) else None
-                if candidate == left_neighbor or candidate == right_neighbor:
+            # Find a mid-range element not in head_refs that won't create adjacent dup.
+            for mid_idx in range(window, tail_start):
+                candidate = assignment[mid_idx]
+                if candidate in head_refs:
                     continue
-                assignment[idx], assignment[swap_idx] = assignment[swap_idx], assignment[idx]
-                swapped = True
+                prev_tail = assignment[tail_idx - 1] if tail_idx > 0 else None
+                next_tail = assignment[tail_idx + 1] if tail_idx + 1 < len(assignment) else None
+                if candidate == prev_tail or candidate == next_tail:
+                    continue
+                left_mid = assignment[mid_idx - 1] if mid_idx > 0 else None
+                right_mid = assignment[mid_idx + 1] if mid_idx + 1 < len(assignment) else None
+                if assignment[tail_idx] == left_mid or assignment[tail_idx] == right_mid:
+                    continue
+                assignment[tail_idx], assignment[mid_idx] = assignment[mid_idx], assignment[tail_idx]
                 break
 
-            if not swapped:
-                continue
-
     @staticmethod
-    def _avoid_cyclic_duplicate(assignment: List[str]) -> None:
-        """Avoid using the same image on both first and last slide when alternatives exist."""
-        if len(assignment) < 2 or assignment[0] != assignment[-1]:
-            return
-
-        for swap_idx in range(len(assignment) - 2, 0, -1):
-            candidate = assignment[swap_idx]
-            if candidate == assignment[0]:
+    def _fix_adjacent_duplicates(assignment: List[str]) -> None:
+        """Swap to break adjacent duplicates, especially at cycle boundaries."""
+        length = len(assignment)
+        for idx in range(1, length):
+            if assignment[idx] != assignment[idx - 1]:
                 continue
-            if candidate == assignment[-2]:
-                continue
-            assignment[-1], assignment[swap_idx] = assignment[swap_idx], assignment[-1]
-            return
+            # Search for the nearest different-valued element to swap with.
+            best = -1
+            best_dist = length
+            for swap_idx in range(length):
+                if swap_idx == idx or swap_idx == idx - 1:
+                    continue
+                candidate = assignment[swap_idx]
+                if candidate == assignment[idx]:
+                    continue
+                # Ensure the swap doesn't create a new adjacent dup.
+                left = assignment[swap_idx - 1] if swap_idx > 0 else None
+                right = assignment[swap_idx + 1] if swap_idx + 1 < length else None
+                if assignment[idx] == left or assignment[idx] == right:
+                    continue
+                dist = abs(swap_idx - idx)
+                if dist < best_dist:
+                    best_dist = dist
+                    best = swap_idx
+            if best >= 0:
+                assignment[idx], assignment[best] = assignment[best], assignment[idx]
 
     def build(
         self,
@@ -138,34 +181,12 @@ class SlideshowBuilder:
 
         slides: List[SlideFrame] = []
 
-        # Build an assignment list that avoids consecutive repeats.
-        # First pass: one unique image per slide (up to len(refs)).
-        # Second pass: fill remaining slots from a reshuffled copy,
-        # skipping any image that would repeat the previous slide.
-        import hashlib as _hl, random as _rng
-
-        assignment: List[str] = list(refs[:count])
-        if count > len(refs):
-            pool_seed = int(_hl.sha256(search_term.encode()).hexdigest(), 16)
-            pool_rng = _rng.Random(pool_seed)
-            extras_needed = count - len(refs)
-            extras: List[str] = []
-            while len(extras) < extras_needed:
-                bag = list(refs)
-                pool_rng.shuffle(bag)
-                for img in bag:
-                    extras.append(img)
-                    if len(extras) >= extras_needed:
-                        break
-
-            # Spread reuse across the full countdown instead of concentrating it at the end.
-            for extra_index, image_ref in enumerate(extras):
-                target_index = int(round(((extra_index + 1) * count) / (extras_needed + 1)))
-                insert_at = self._find_insert_position(assignment, image_ref, target_index)
-                assignment.insert(insert_at, image_ref)
-
-            self._separate_adjacent_duplicates(assignment)
-            self._avoid_cyclic_duplicate(assignment)
+        # Build assignment: direct slice when enough unique images,
+        # otherwise stride-interleave to maximize spacing between repeats.
+        if count <= len(refs):
+            assignment = list(refs[:count])
+        else:
+            assignment = self._build_interleaved_assignment(refs, count, normalized_term)
 
         for idx in range(count):
             if idx % max(1, count // 10) == 0:

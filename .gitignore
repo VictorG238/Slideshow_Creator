@@ -28,6 +28,7 @@ recovered_exe/
 Thumbs.db
 desktop.ini
 
+
 # Testing
 .pytest_cache/
 .ruff_cache/
@@ -44,3 +45,6 @@ htmlcov/
 .agents/
 .specify/
 skills-lock.json
+.specify-lock.json
+specs/
+.github/

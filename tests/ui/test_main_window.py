@@ -16,8 +16,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from slideshow_creator.ui.main_window import MainWindow
+from slideshow_creator.models.domain import SearchRunSummary, ShortfallReason
 from slideshow_creator.services.slideshow_builder import BuildResult, BuildSummary, SlideFrame
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -32,8 +32,7 @@ def window(qtbot):
     qtbot.waitExposed(win)
     return win
 
-
-def _dummy_build_result(count: int = 3) -> BuildResult:
+def _dummy_build_result(count: int = 3, include_search_summary: bool = False) -> BuildResult:
     slides = [
         SlideFrame(
             index=i,
@@ -44,6 +43,21 @@ def _dummy_build_result(count: int = 3) -> BuildResult:
         )
         for i in range(count)
     ]
+    
+    search_summary = None
+    if include_search_summary:
+        reasons = [ShortfallReason.LOW_AVAILABILITY] if count < 10 else []
+        search_summary=SearchRunSummary(
+            requested=count,
+            discovered=count + 5,
+            invalid_removed=1,
+            duplicate_removed=4,
+            selected=count,
+            provider_logs={"google": count},
+            shortfall_reasons=reasons,
+            retry_suggestions=["Try fewer slides"] if reasons else []
+        )
+
     return BuildResult(
         slides=slides,
         summary=BuildSummary(
@@ -52,6 +66,7 @@ def _dummy_build_result(count: int = 3) -> BuildResult:
             reused_images=0,
             warning=None,
         ),
+        search_summary=search_summary,
     )
 
 
@@ -212,6 +227,7 @@ class TestTooltips:
         assert window.engine_google_checkbox.toolTip() != ""
         assert window.engine_bing_checkbox.toolTip() != ""
         assert window.engine_duckduckgo_checkbox.toolTip() != ""
+        assert window.engine_openverse_checkbox.toolTip() != ""
 
     def test_target_size_has_tooltip(self, window: MainWindow) -> None:
         assert window.target_size_input.toolTip() != ""
@@ -262,18 +278,22 @@ class TestSearchEngineCheckboxes:
         assert window.engine_google_checkbox.isChecked()
         assert window.engine_bing_checkbox.isChecked()
         assert window.engine_duckduckgo_checkbox.isChecked()
+        assert window.engine_openverse_checkbox.isChecked()
 
     def test_selected_engines_returns_checked_only(self, window: MainWindow) -> None:
         window.engine_bing_checkbox.setChecked(False)
+        window.engine_openverse_checkbox.setChecked(False)
         engines = window._selected_search_engines()
         assert "google" in engines
         assert "bing" not in engines
+        assert "openverse" not in engines
         assert "duckduckgo" in engines
 
     def test_no_engines_returns_empty_list(self, window: MainWindow) -> None:
         window.engine_google_checkbox.setChecked(False)
         window.engine_bing_checkbox.setChecked(False)
         window.engine_duckduckgo_checkbox.setChecked(False)
+        window.engine_openverse_checkbox.setChecked(False)
         assert window._selected_search_engines() == []
 
 
@@ -302,3 +322,129 @@ class TestProgressAndPhaseIndicators:
         assert not window.pick_color_button.isEnabled()
         window.set_busy(False)
         assert window.generate_button.isEnabled()
+
+
+# ===========================================================================
+# Phase 5 / US3: Shortfall summary rendering and plain-language guidance (T023)
+# ===========================================================================
+
+
+class TestShortfallSummaryRendering:
+    """T023: Verify shortfall diagnostics appear in preview and use plain language."""
+
+    def test_shortfall_line_in_preview_text(self, window: MainWindow) -> None:
+        ss = SearchRunSummary(
+            requested=50,
+            discovered=20,
+            invalid_removed=2,
+            duplicate_removed=3,
+            near_duplicate_removed=1,
+            selected=14,
+            provider_logs={"google": 12, "bing": 8},
+            shortfall_reasons=[ShortfallReason.LOW_AVAILABILITY, ShortfallReason.FILTERED_DUPLICATES],
+            retry_suggestions=["Try a broader search term", "Reduce slide count to 20 or fewer"],
+            source_errors={"bing": "No results from bing for 'rareterm' after retry"},
+        )
+        result = BuildResult(
+            slides=[
+                SlideFrame(i, 3 - i, f"slide {i}", f"https://x.com/{i}.jpg", "#87CEEB")
+                for i in range(3)
+            ],
+            summary=BuildSummary(3, 3, 0),
+            search_summary=ss,
+        )
+        window.show_generation_result(result)
+        preview = window.preview_text.toPlainText()
+        assert "near-duplicates" in preview.lower()
+        assert "Source failures" in preview
+        assert "bing" in preview
+        assert "Shortfall reasons" in preview
+        assert "Recovery suggestions" in preview
+
+    def test_source_errors_shown_when_present(self, window: MainWindow) -> None:
+        ss = SearchRunSummary(
+            requested=10,
+            discovered=3,
+            invalid_removed=0,
+            duplicate_removed=1,
+            near_duplicate_removed=0,
+            selected=2,
+            provider_logs={"google": 3},
+            shortfall_reasons=[ShortfallReason.LOW_AVAILABILITY],
+            retry_suggestions=["Try enabling more search engines"],
+            source_errors={"google": "No results from google for 'xyz' after retry"},
+        )
+        result = BuildResult(
+            slides=[SlideFrame(0, 1, "top 1 xyz", "https://x.com/0.jpg", "#87CEEB")],
+            summary=BuildSummary(1, 1, 0),
+            search_summary=ss,
+        )
+        window.show_generation_result(result)
+        preview = window.preview_text.toPlainText()
+        assert "Source failures" in preview
+
+    def test_plain_language_shortfall_reason_labels(self, window: MainWindow) -> None:
+        ss = SearchRunSummary(
+            requested=20,
+            discovered=5,
+            invalid_removed=1,
+            duplicate_removed=0,
+            near_duplicate_removed=0,
+            selected=4,
+            provider_logs={"google": 5},
+            shortfall_reasons=[ShortfallReason.LOW_AVAILABILITY],
+            retry_suggestions=[],
+            source_errors={},
+        )
+        result = BuildResult(
+            slides=[SlideFrame(0, 3, "slide", "https://x.com/0.jpg", "#87CEEB")],
+            summary=BuildSummary(1, 1, 0),
+            search_summary=ss,
+        )
+        window.show_generation_result(result)
+        preview = window.preview_text.toPlainText()
+        assert "low_availability" in preview.lower() or "availability" in preview.lower()
+
+
+# ===========================================================================
+# Phase 5 / US3: Rerun interaction preserving prior inputs (T024)
+# ===========================================================================
+
+
+class TestRerunInteraction:
+    """T024: Verify rerun preserves search term and count."""
+
+    def test_rerun_trigger_exists_when_result_available(self, window: MainWindow) -> None:
+        window.search_input.setText("cars")
+        window.count_input.setValue(25)
+        window.show_generation_result(_dummy_build_result(5, include_search_summary=True))
+        assert hasattr(window, "rerun_button")
+        assert window.rerun_button.isVisible()
+
+    def test_rerun_signal_emits_with_stored_inputs(self, window: MainWindow, qtbot) -> None:
+        window.search_input.setText("cars")
+        window.count_input.setValue(25)
+        window._last_rerun_term = "cars"
+        window._last_rerun_count = 25
+        window._last_rerun_engines = ["google", "bing", "duckduckgo", "openverse"]
+        window.show_generation_result(_dummy_build_result(5, include_search_summary=True))
+
+        signals_received = []
+
+        def _on_rerun(term, count, color, engines):
+            signals_received.append((term, count, color, engines))
+
+        window.rerun_requested.connect(_on_rerun)
+
+        with qtbot.waitSignal(window.rerun_requested, timeout=2000):
+            window.rerun_button.click()
+
+        assert len(signals_received) == 1
+        assert signals_received[0][0] == "cars"
+        assert signals_received[0][1] == 25
+        assert signals_received[0][2] == window._selected_color
+        assert isinstance(signals_received[0][3], list)
+
+    def test_rerun_button_hidden_before_generation(self, window: MainWindow) -> None:
+        assert hasattr(window, "rerun_button")
+        assert not window.rerun_button.isVisible()

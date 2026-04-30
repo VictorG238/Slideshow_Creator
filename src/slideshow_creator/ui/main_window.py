@@ -29,7 +29,6 @@ from PySide6.QtWidgets import (
     QWidget,
     QColorDialog,
     QFileDialog,
-    QGraphicsDropShadowEffect,
 )
 
 from slideshow_creator import __version__
@@ -48,6 +47,7 @@ class MainWindow(QMainWindow):
     generation_requested = Signal(str, int, str, object)
     export_requested = Signal(float, str, str)
     audio_changed = Signal(str)
+    rerun_requested = Signal(str, int, str, object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -55,6 +55,9 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(APP_MIN_WIDTH, APP_MIN_HEIGHT)
         self.setStyleSheet(build_app_stylesheet())
         self._selected_color = DEFAULT_COUNTDOWN_BG
+        self._last_rerun_term: str = ""
+        self._last_rerun_count: int = 0
+        self._last_rerun_engines: list[str] = []
         self._setup_ui()
         self._set_phase_status("idle", level="info")
         self.kpi_next_action_value.setText("Enter a search term and click Generate slideshow")
@@ -130,16 +133,6 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(scroll)
         self.setCentralWidget(root)
 
-        def _apply_shadow(widget: QWidget, blur: int = 35, alpha: int = 110, y_off: int = 10) -> None:
-            shadow = QGraphicsDropShadowEffect(widget)
-            shadow.setBlurRadius(blur)
-            shadow.setColor(QColor(0, 0, 0, alpha))
-            shadow.setOffset(0, y_off)
-            widget.setGraphicsEffect(shadow)
-
-        _apply_shadow(self.summary_strip)
-        for card in self.section_cards:
-            _apply_shadow(card)
         self._progress_animation = QPropertyAnimation(self.progress_bar, b"value", self)
         self._progress_animation.setDuration(250)
         self._progress_animation.setEasingCurve(QEasingCurve.OutCubic)
@@ -164,7 +157,7 @@ class MainWindow(QMainWindow):
         return strip
 
     def _create_kpi_card(self, layout: QGridLayout, row: int, col: int, title: str, value: str, accent_color: str = "#6366f1") -> QLabel:
-        card = QFrame(self)
+        card = QFrame(layout.parentWidget())
         card.setObjectName("kpiCard")
         card.setStyleSheet(f"QFrame#kpiCard {{ border-top: 3px solid {accent_color}; background: rgba(17, 24, 39, 200); border-radius: 10px; border-left: none; border-right: none; border-bottom: none; }}")
         card_layout = QVBoxLayout(card)
@@ -183,6 +176,12 @@ class MainWindow(QMainWindow):
         return value_label
 
     def _reflow_sections(self, width: int) -> None:
+        self._last_reflow_width = width
+        while self.sections_grid.count():
+            item = self.sections_grid.takeAt(0)
+            if item.widget():
+                item.widget().setParent(self.sections_grid.parentWidget())
+
         if width < 1080:
             self.sections_grid.addWidget(self.section_inputs, 0, 0)
             self.sections_grid.addWidget(self.section_audio, 1, 0)
@@ -228,13 +227,16 @@ class MainWindow(QMainWindow):
         search_label = QLabel("Search term", card)
         search_label.setObjectName("fieldLabel")
         self.search_input = QLineEdit(card)
+        self.search_input.setObjectName("searchInput")
         self.search_input.setPlaceholderText("e.g. car")
-        self.search_input.setToolTip("Search public image sources for this term.")
+        self.search_input.setToolTip("Search public image sources for this term. Press Enter to generate.")
+        self.search_input.returnPressed.connect(self._on_generate_clicked)
 
         count_label = QLabel("Slide count", card)
         count_label.setObjectName("fieldLabel")
         self.count_input = QSpinBox(card)
-        self.count_input.setRange(1, 500)
+        self.count_input.setObjectName("countInput")
+        self.count_input.setRange(1, 2000)
         self.count_input.setValue(50)
         self.count_input.setToolTip("Number of slideshow slides to generate.")
 
@@ -250,9 +252,14 @@ class MainWindow(QMainWindow):
         self.engine_duckduckgo_checkbox = QCheckBox("DuckDuckGo", card)
         self.engine_duckduckgo_checkbox.setChecked(True)
         self.engine_duckduckgo_checkbox.setToolTip("Use DuckDuckGo Images as a source.")
+        self.engine_openverse_checkbox = QCheckBox("Openverse", card)
+        self.engine_openverse_checkbox.setChecked(True)
+        self.engine_openverse_checkbox.setToolTip("Use Openverse (public domain/CC-licensed) as a source.")
+
         engines_row.addWidget(self.engine_google_checkbox)
         engines_row.addWidget(self.engine_bing_checkbox)
         engines_row.addWidget(self.engine_duckduckgo_checkbox)
+        engines_row.addWidget(self.engine_openverse_checkbox)
         engines_row.addStretch(1)
 
         color_label = QLabel("Countdown background", card)
@@ -461,6 +468,7 @@ class MainWindow(QMainWindow):
         self.preview_text = QPlainTextEdit(self.preview_card)
         self.preview_text.setObjectName("previewText")
         self.preview_text.setReadOnly(True)
+        self.preview_text.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         self.preview_text.setMinimumHeight(220)
         self.preview_text.setPlaceholderText("Slide preview and warnings will appear here.")
         preview_layout.addWidget(self.preview_text)
@@ -469,6 +477,14 @@ class MainWindow(QMainWindow):
         layout.addLayout(phase_row)
         layout.addWidget(self.progress_bar)
         layout.addWidget(self.preview_card)
+
+        self.rerun_button = QPushButton("Rerun with same settings", card)
+        self.rerun_button.setObjectName("secondaryButton")
+        self.rerun_button.clicked.connect(self._on_rerun_clicked)
+        self.rerun_button.setToolTip("Run the search again using the same term, count, and engines.")
+        self.rerun_button.setVisible(False)
+        layout.addWidget(self.rerun_button)
+
         return card
 
     def _set_phase_status(self, phase: str, level: str = "info") -> None:
@@ -508,11 +524,21 @@ class MainWindow(QMainWindow):
         self.phase_text_label.style().unpolish(self.phase_text_label)
         self.phase_text_label.style().polish(self.phase_text_label)
 
+    @staticmethod
+    def _color_luminance(hex_color: str) -> float:
+        hex_c = hex_color.lstrip("#")
+        r, g, b = (int(hex_c[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
+        r = r / 12.92 if r <= 0.03928 else ((r + 0.055) / 1.055) ** 2.4
+        g = g / 12.92 if g <= 0.03928 else ((g + 0.055) / 1.055) ** 2.4
+        b = b / 12.92 if b <= 0.03928 else ((b + 0.055) / 1.055) ** 2.4
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
     def _refresh_color_swatch(self) -> None:
         self.color_swatch.setText(self._selected_color)
         self.color_swatch.setAlignment(Qt.AlignCenter)
+        text_color = "#ffffff" if self._color_luminance(self._selected_color) < 0.5 else "#0f1720"
         self.color_swatch.setStyleSheet(
-            f"background: {self._selected_color}; color: #0f1720; font-weight: 700;"
+            f"background: {self._selected_color}; color: {text_color}; font-weight: 700;"
         )
 
     def _on_pick_color(self) -> None:
@@ -535,6 +561,10 @@ class MainWindow(QMainWindow):
             self.show_error("Select at least one search engine.")
             return
 
+        self._last_rerun_term = search_term
+        self._last_rerun_count = count
+        self._last_rerun_engines = list(selected_engines)
+
         self.show_progress("Preparing generation request...")
         self.kpi_next_action_value.setText("Collecting images and building slideshow")
         self.kpi_slides_value.setText(str(count))
@@ -550,6 +580,8 @@ class MainWindow(QMainWindow):
             selected.append("bing")
         if self.engine_duckduckgo_checkbox.isChecked():
             selected.append("duckduckgo")
+        if self.engine_openverse_checkbox.isChecked():
+            selected.append("openverse")
         return selected
 
     def _on_browse_audio(self) -> None:
@@ -601,6 +633,7 @@ class MainWindow(QMainWindow):
         self.engine_google_checkbox.setDisabled(busy)
         self.engine_bing_checkbox.setDisabled(busy)
         self.engine_duckduckgo_checkbox.setDisabled(busy)
+        self.engine_openverse_checkbox.setDisabled(busy)
         self.count_input.setDisabled(busy)
         self.audio_path_input.setDisabled(busy)
         self.audio_browse_button.setDisabled(busy)
@@ -610,6 +643,7 @@ class MainWindow(QMainWindow):
         self.output_path_input.setDisabled(busy)
         self.output_browse_button.setDisabled(busy)
         self.export_button.setDisabled(busy or not self.export_button.isEnabled())
+        self.rerun_button.setDisabled(busy)
         if busy and self.progress_bar.value() >= 100:
             self.progress_bar.setValue(0)
 
@@ -617,9 +651,10 @@ class MainWindow(QMainWindow):
         self.export_button.setEnabled(ready)
 
     def show_progress(self, message: str, percent: float | None = None, phase: str | None = None) -> None:
-        self.progress_label.setObjectName("progressLabel")
-        self.progress_label.style().unpolish(self.progress_label)
-        self.progress_label.style().polish(self.progress_label)
+        if self.progress_label.objectName() != "progressLabel":
+            self.progress_label.setObjectName("progressLabel")
+            self.progress_label.style().unpolish(self.progress_label)
+            self.progress_label.style().polish(self.progress_label)
         self.progress_label.setText(message)
         self.statusBar().showMessage(message)
         self.kpi_next_action_value.setText(message)
@@ -666,19 +701,27 @@ class MainWindow(QMainWindow):
         self.kpi_next_action_value.setText(hint or "Review the error details and retry")
         self.kpi_export_value.setText("Failed")
         self.statusBar().showMessage(message)
+        category, _icon = self._classify_error(message)
+        if category in ("System", "Media"):
+            self.set_export_ready(False)
         if not self._is_inline_validation_error(message):
             self._show_error_dialog(message, hint)
 
-    @staticmethod
-    def _is_inline_validation_error(message: str) -> bool:
+    _INLINE_ERROR_SIGNATURES: set[str] = {
+        "search term is required",
+        "select at least one search engine",
+        "slide count must be greater than 0",
+        "select an output file before exporting",
+        "a generation is already running",
+        "generate a slideshow preview before exporting",
+        "an export is already running",
+        "selected mp3 could not be validated",
+    }
+
+    @classmethod
+    def _is_inline_validation_error(cls, message: str) -> bool:
         lowered = message.lower()
-        inline_markers = [
-            "search term is required",
-            "select at least one search engine",
-            "slide count must be greater than 0",
-            "select an output file",
-        ]
-        return any(marker in lowered for marker in inline_markers)
+        return any(sig in lowered for sig in cls._INLINE_ERROR_SIGNATURES)
 
     @staticmethod
     def _classify_error(message: str) -> tuple[str, QMessageBox.Icon]:
@@ -730,15 +773,46 @@ class MainWindow(QMainWindow):
         self.encoder_status_label.style().polish(self.encoder_status_label)
         self.encoder_status_label.setText(message)
 
+    def _on_rerun_clicked(self) -> None:
+        self.rerun_requested.emit(
+            self._last_rerun_term,
+            self._last_rerun_count,
+            self._selected_color,
+            self._last_rerun_engines,
+        )
+
     def show_generation_result(self, result: BuildResult) -> None:
         """Render a compact preview of generated slides and warnings."""
-        lines = [
+        lines = []
+        if result.search_summary:
+            ss = result.search_summary
+            lines.extend([
+                "--- Search Summary ---",
+                f"Requested: {ss.requested} | Discovered: {ss.discovered} | Selected: {ss.selected}",
+                f"Removed: {ss.duplicate_removed} exact duplicates, {ss.near_duplicate_removed} near-duplicates, {ss.invalid_removed} invalid",
+            ])
+            if ss.provider_logs:
+                src_breakdown = ", ".join(f"{name}: {count}" for name, count in ss.provider_logs.items())
+                lines.append(f"Source contributions: {src_breakdown}")
+            if ss.source_errors:
+                sources = ", ".join(ss.source_errors.keys())
+                lines.append(f"Source failures: {sources}")
+            if ss.shortfall_reasons:
+                reasons = ", ".join(r.value for r in ss.shortfall_reasons)
+                lines.append(f"Shortfall reasons: {reasons}")
+            if ss.retry_suggestions:
+                lines.append("Recovery suggestions:")
+                for idx, suggestion in enumerate(ss.retry_suggestions, 1):
+                    lines.append(f"  {idx}. {suggestion}")
+            lines.append("")
+
+        lines.extend([
             f"Requested slides: {result.summary.requested_count}",
             f"Unique images available: {result.summary.available_images}",
             f"Image slots reused: {result.summary.reused_images}",
             "",
             "Preview (first 5 slides):",
-        ]
+        ])
         for frame in result.slides[:5]:
             lines.append(
                 f"- #{frame.index + 1} | countdown={frame.countdown_value} | "
@@ -756,6 +830,7 @@ class MainWindow(QMainWindow):
         )
         self.kpi_export_value.setText("Ready to export")
         self.kpi_next_action_value.setText("Choose output path and click Export video")
+        self.rerun_button.setVisible(True)
         self.set_encoder_status("Pending (export not started)")
         if result.summary.warning:
             self._set_phase_status("warn", level="warn")

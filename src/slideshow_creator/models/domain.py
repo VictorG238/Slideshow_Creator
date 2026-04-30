@@ -40,6 +40,8 @@ class AppError(Exception):
         return self.message
 
 
+from typing import Dict, List, Optional
+
 @dataclass(slots=True)
 class ProgressEvent:
     """Real-time progress reporting hook payload."""
@@ -47,6 +49,35 @@ class ProgressEvent:
     phase: str
     message: str
     percent: Optional[float] = None
+
+
+class ShortfallReason(str, Enum):
+    LOW_AVAILABILITY = "low_availability"
+    FILTERED_DUPLICATES = "filtered_duplicates"
+    FILTERED_VALIDATION = "filtered_validation"
+
+
+@dataclass(slots=True)
+class SearchRunSummary:
+    requested: int
+    discovered: int
+    invalid_removed: int
+    duplicate_removed: int
+    selected: int
+    provider_logs: Dict[str, int]
+    shortfall_reasons: List[ShortfallReason] = field(default_factory=list)
+    retry_suggestions: List[str] = field(default_factory=list)
+    source_errors: Dict[str, str] = field(default_factory=dict)
+    near_duplicate_removed: int = 0
+
+    @property
+    def numeric_shortfall(self) -> int:
+        return max(0, self.requested - self.selected)
+
+    @property
+    def is_complete(self) -> bool:
+        return self.numeric_shortfall == 0
+
 
 
 def _require_non_empty(value: str, field_name: str) -> str:
