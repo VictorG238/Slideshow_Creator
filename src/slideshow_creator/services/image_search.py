@@ -161,7 +161,7 @@ class ImageSearchService:
         session: Optional[requests.Session] = None,
         validate_candidates: bool = False,
         validation_pool_factor: int = 1,
-        max_validation_checks: int = 80,
+        max_validation_checks: int = 500,
         validation_timeout_seconds: float = 1.8,
         retry_backoff_seconds: float = 2.0,
     ) -> None:
@@ -375,13 +375,10 @@ class ImageSearchService:
         if not candidates:
             return []
 
-        requested_pool = max(limit, limit * self.validation_pool_factor)
-        pool_buffer = max(5, limit // 4)
-        desired_pool = min(len(candidates), min(requested_pool, limit + pool_buffer))
-        max_checks = min(
-            len(candidates),
-            max(limit, min(self.max_validation_checks, desired_pool * 2)),
-        )
+        # Scale the check budget with limit so large requests aren't under-validated.
+        # Allow checking up to max_validation_checks or all candidates, whichever is less.
+        max_checks = min(len(candidates), max(limit * 2, self.max_validation_checks))
+        desired_pool = min(len(candidates), max(limit, limit + max(5, limit // 4)))
 
         selected: List[ImageCandidate] = []
         selected_urls: set[str] = set()
@@ -404,11 +401,18 @@ class ImageSearchService:
             if len(selected) >= desired_pool:
                 break
 
-        # If validation returned too few images, backfill by URL to avoid empty generations.
+        # Backfill with remaining unvalidated candidates if still short.
+        # Also check against seen_signatures to avoid adding known visual dupes.
         if len(selected) < limit:
             for candidate in candidates:
                 if candidate.source_url in selected_urls:
                     continue
+                # Try to get signature for backfill candidates too, but don't block on failure.
+                sig = self._probe_image_signature(candidate.source_url)
+                if sig and sig in seen_signatures:
+                    continue
+                if sig:
+                    seen_signatures.add(sig)
                 selected.append(candidate)
                 selected_urls.add(candidate.source_url)
                 if len(selected) >= limit:
