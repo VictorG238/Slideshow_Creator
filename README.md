@@ -1,5 +1,9 @@
 # Slideshow Creator
 
+> [!CAUTION]
+> **Project Status: ALPHA**  
+> This software is currently in active development. You may encounter bugs, performance issues, or incomplete features. 
+
 Desktop application that generates countdown slideshow videos from internet images with optional looped MP3 background music.
 
 Type a search term, pick how many slides you want, and the app searches multiple image providers, assembles a numbered countdown sequence, and exports a single video file -- all from one window.
@@ -69,9 +73,9 @@ run_app.bat --doctor   # verify environment and FFmpeg
 
 Pre-built Windows executables are available on the [Releases](https://github.com/VictorG238/Slideshow_Creator/releases) page. No Python installation required.
 
-1. Download `slideshow_creator.exe` from the latest release.
-2. The file comes now bundled with ffmpeg inside, if still doesn't work for you, follow the step below, otherwise ignored it
-3. Place FFmpeg binaries (`ffmpeg.exe`, `ffprobe.exe`) next to it or ensure they are in your system PATH.
+1. Download `SlideshowCreator.exe` from the latest release.
+2. The executable is now **bundled with FFmpeg**, so no external setup is required for most users.
+3. If you have specific hardware needs, you can still place your own `ffmpeg.exe` and `ffprobe.exe` in an `assets/ffmpeg/` folder next to the exe or in your system PATH.
 4. Double-click the exe to launch.
 
 ---
