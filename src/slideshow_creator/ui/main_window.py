@@ -45,7 +45,7 @@ class MainWindow(QMainWindow):
     """Base main window scaffold used by subsequent task phases."""
 
     generation_requested = Signal(str, int, str, object)
-    export_requested = Signal(float, str, str)
+    export_requested = Signal(float, str, str, bool)
     audio_changed = Signal(str)
     rerun_requested = Signal(str, int, str, object)
 
@@ -407,6 +407,10 @@ class MainWindow(QMainWindow):
         self.encoder_status_label.setWordWrap(True)
         self.encoder_status_label.setToolTip("Shows whether export used NVIDIA NVENC or CPU fallback.")
 
+        self.deep_fried_checkbox = QCheckBox("\U0001f480 Deep Fried Export", card)
+        self.deep_fried_checkbox.setToolTip("Export with ultra-low quality, extreme saturation, and distorted audio")
+        self.deep_fried_checkbox.toggled.connect(self._on_deep_fried_toggled)
+
         self.export_button = QPushButton("Export video", card)
         self.export_button.clicked.connect(self._on_export_clicked)
         self.export_button.setEnabled(False)
@@ -416,11 +420,12 @@ class MainWindow(QMainWindow):
         form.addWidget(self.target_size_input, 0, 1)
         form.addWidget(format_label, 1, 0)
         form.addWidget(self.format_input, 1, 1)
-        form.addWidget(output_label, 2, 0)
-        form.addLayout(output_row, 2, 1)
-        form.addWidget(encoder_label, 3, 0)
-        form.addWidget(self.encoder_status_label, 3, 1)
-        form.addWidget(self.export_button, 4, 1)
+        form.addWidget(self.deep_fried_checkbox, 2, 1)
+        form.addWidget(output_label, 3, 0)
+        form.addLayout(output_row, 3, 1)
+        form.addWidget(encoder_label, 4, 0)
+        form.addWidget(self.encoder_status_label, 4, 1)
+        form.addWidget(self.export_button, 5, 1)
 
         layout.addLayout(form)
         return card
@@ -612,19 +617,24 @@ class MainWindow(QMainWindow):
         if selected:
             self.output_path_input.setText(selected)
 
+    def _on_deep_fried_toggled(self, checked: bool) -> None:
+        self.target_size_input.setDisabled(checked)
+        self.format_input.setDisabled(checked)
+
     def _on_export_clicked(self) -> None:
         output_path = self.output_path_input.text().strip()
         if not output_path:
             self.show_error("Select an output file before exporting.")
             return
 
+        deep_fried = self.deep_fried_checkbox.isChecked()
         target_size_mb = float(self.target_size_input.value())
         preferred_format = self.format_input.currentText().strip().lower()
         self.show_progress("Preparing export request...")
         self.kpi_next_action_value.setText("Encoding and muxing video")
         self.kpi_export_value.setText(f"Target {target_size_mb:.1f} MB ({preferred_format.upper()})")
         self.set_encoder_status("Detecting encoder capabilities...")
-        self.export_requested.emit(target_size_mb, preferred_format, output_path)
+        self.export_requested.emit(target_size_mb, preferred_format, output_path, deep_fried)
 
     def set_busy(self, busy: bool) -> None:
         self.generate_button.setDisabled(busy)
@@ -638,8 +648,10 @@ class MainWindow(QMainWindow):
         self.audio_path_input.setDisabled(busy)
         self.audio_browse_button.setDisabled(busy)
         self.audio_clear_button.setDisabled(busy)
-        self.target_size_input.setDisabled(busy)
-        self.format_input.setDisabled(busy)
+        self.deep_fried_checkbox.setDisabled(busy)
+        deep_fried_on = self.deep_fried_checkbox.isChecked()
+        self.target_size_input.setDisabled(busy or deep_fried_on)
+        self.format_input.setDisabled(busy or deep_fried_on)
         self.output_path_input.setDisabled(busy)
         self.output_browse_button.setDisabled(busy)
         self.export_button.setDisabled(busy or not self.export_button.isEnabled())

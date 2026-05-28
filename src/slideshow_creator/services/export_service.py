@@ -20,6 +20,16 @@ from slideshow_creator.services.slideshow_builder import SlideFrame
 
 DEFAULT_SLIDE_DURATION_SECONDS = 5.0
 
+# Deep-fried export mode constants
+DEEPFRIED_WIDTH = 320
+DEEPFRIED_HEIGHT = 240
+DEEPFRIED_FPS = 12
+DEEPFRIED_VIDEO_BITRATE_KBPS = 120
+DEEPFRIED_AUDIO_BITRATE_KBPS = 24
+DEEPFRIED_JPEG_QUALITY = 8
+DEEPFRIED_SATURATION = 3.0
+DEEPFRIED_CONTRAST = 2.0
+
 
 class ExportServiceError(RuntimeError):
     """Raised when export preparation or rendering fails."""
@@ -222,14 +232,32 @@ class ExportService:
         caps: EncoderCapabilities,
         slide_duration_seconds: float = DEFAULT_SLIDE_DURATION_SECONDS,
         fps: int = 30,
+        deep_fried: bool = False,
     ) -> ExportProfile:
         """Plan bitrate and resolution to target a max output size in MB."""
         if slide_count <= 0:
             raise ExportServiceError("Cannot plan export for zero slides.")
-        if target_size_mb <= 0:
+        if target_size_mb <= 0 and not deep_fried:
             raise ExportServiceError("Target size in MB must be greater than 0.")
 
         duration_seconds = max(slide_count * slide_duration_seconds, slide_duration_seconds)
+
+        if deep_fried:
+            # Force mp4/aac for deep-fried mode regardless of user preference
+            video_codec = "libx264" if caps.has_libx264 else ("h264_nvenc" if caps.has_nvenc else "h264")
+            return ExportProfile(
+                container="mp4",
+                width=DEEPFRIED_WIDTH,
+                height=DEEPFRIED_HEIGHT,
+                fps=DEEPFRIED_FPS,
+                slide_duration_seconds=slide_duration_seconds,
+                duration_seconds=duration_seconds,
+                video_codec=video_codec,
+                audio_codec="aac",
+                video_bitrate_kbps=DEEPFRIED_VIDEO_BITRATE_KBPS,
+                audio_bitrate_kbps=DEEPFRIED_AUDIO_BITRATE_KBPS,
+            )
+
         container, video_codec, audio_codec = self.preferred_container_and_codecs(prefer_webm, caps)
         audio_bitrate_kbps = 96 if container == "webm" else 128
 
@@ -437,6 +465,7 @@ class ExportService:
         profile: ExportProfile,
         workdir: Path,
         progress: Callable[[str, float], None],
+        deep_fried: bool = False,
     ) -> list[tuple[Path, float]]:
         rendered: list[tuple[Path, float]] = []
         image_cache: dict[str, Optional[Image.Image]] = {}
@@ -495,7 +524,8 @@ class ExportService:
             draw_text.text((x, y), text_n, fill=(255, 255, 255), font=font)
             
             out_text = workdir / f"frame_{idx:04d}_a.jpg"
-            text_frame.save(out_text, format="JPEG", quality=92)
+            jpeg_quality = DEEPFRIED_JPEG_QUALITY if deep_fried else 92
+            text_frame.save(out_text, format="JPEG", quality=jpeg_quality)
             rendered.append((out_text, text_dur))
 
             # --- Frame 2: Image ---
@@ -563,8 +593,14 @@ class ExportService:
                 last_resolved_ref = resolved_ref
             img_frame = ImageOps.pad(img, (profile.width, profile.height), method=Image.Resampling.LANCZOS, color=(0, 0, 0))
 
+            # Apply deep-fried visual filter: extreme saturation + contrast
+            if deep_fried:
+                img_frame = ImageEnhance.Color(img_frame).enhance(DEEPFRIED_SATURATION)
+                img_frame = ImageEnhance.Contrast(img_frame).enhance(DEEPFRIED_CONTRAST)
+
             out_img = workdir / f"frame_{idx:04d}_b.jpg"
-            img_frame.save(out_img, format="JPEG", quality=92)
+            jpeg_quality = DEEPFRIED_JPEG_QUALITY if deep_fried else 92
+            img_frame.save(out_img, format="JPEG", quality=jpeg_quality)
             rendered.append((out_img, img_dur))
 
         return rendered
@@ -666,6 +702,7 @@ class ExportService:
         audio_track: Optional[AudioTrack] = None,
         audio_path: Optional[str] = None,
         progress_cb: Optional[Callable[[ProgressEvent], None]] = None,
+        deep_fried: bool = False,
     ) -> ExportResult:
         """Export slideshow to video respecting size target and codec fallback."""
         def _report(msg: str, percent: float = 0.0) -> None:
@@ -676,6 +713,8 @@ class ExportService:
             raise AppError(ErrorCategory.USER_INPUT, "No slides available for export.", "Generate a slideshow preview before exporting.")
 
         _report("Detecting FFmpeg capabilities...", 0.0)
+        if deep_fried:
+            _report("\u26a0\ufe0f Deep Fried mode: audio will be LOUD and distorted", 0.02)
         caps = self.detect_capabilities()
         if not caps.ffmpeg_path:
             raise AppError(
@@ -689,6 +728,7 @@ class ExportService:
             target_size_mb=target_size_mb,
             prefer_webm=prefer_webm,
             caps=caps,
+            deep_fried=deep_fried,
         )
 
         if prefer_webm and profile.container != "webm":
@@ -711,7 +751,7 @@ class ExportService:
             _report("Preparing slide images...", 0.1)
             def _img_stage_progress(msg: str, p: float) -> None:
                 _report(msg, 0.1 + (p * 0.4))
-            frames_and_durations = self._render_slides_to_images(slides, profile, workdir, _img_stage_progress)
+            frames_and_durations = self._render_slides_to_images(slides, profile, workdir, _img_stage_progress, deep_fried=deep_fried)
             concat_file = self._write_concat_file(frames_and_durations, workdir)
 
             silent_video = workdir / f"silent.{profile.container}"
@@ -798,14 +838,19 @@ class ExportService:
                     "-c:a",
                     profile.audio_codec,
                     "-b:a",
-                    f"{profile.audio_bitrate_kbps}k",
-                    str(output),
+                    f"{DEEPFRIED_AUDIO_BITRATE_KBPS}k" if deep_fried else f"{profile.audio_bitrate_kbps}k",
                     ]
                 )
+                if deep_fried:
+                    mux_cmd.extend(["-af", "volume=15dB,alimiter=limit=0.3:attack=0.1:release=1"])
+                mux_cmd.append(str(output))
                 self._run(mux_cmd)
             else:
                 shutil.copyfile(silent_video, output)
 
         actual_size_mb = output.stat().st_size / (1024 * 1024)
-        _report(f"Export complete: {actual_size_mb:.2f} MB", 1.0)
+        if deep_fried:
+            _report(f"\U0001f480 Deep Fried export complete: {actual_size_mb:.2f} MB", 1.0)
+        else:
+            _report(f"Export complete: {actual_size_mb:.2f} MB", 1.0)
         return ExportResult(output_path=str(output), actual_size_mb=actual_size_mb, profile=profile)

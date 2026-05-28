@@ -148,7 +148,7 @@ class AppController(QObject):
         self._generation_worker = None
         self._generation_thread = None
 
-    def _handle_export_request(self, target_size_mb: float, preferred_format: str, output_path: str) -> None:
+    def _handle_export_request(self, target_size_mb: float, preferred_format: str, output_path: str, deep_fried: bool = False) -> None:
         if self._latest_build_result is None:
             self.window.show_error("Generate a slideshow preview before exporting.")
             return
@@ -187,6 +187,7 @@ class AppController(QObject):
                 prefer_webm=(preferred_format == "webm"),
                 audio_track=audio_track,
                 progress_cb=progress_cb,
+                deep_fried=deep_fried,
             )
 
         self._start_export_task(_task)
